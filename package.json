@@ -1,0 +1,27 @@
+{
+  "name": "order-mcp",
+  "version": "1.0.0",
+  "description": "Groq-powered order assistant using MCP and a REST backend",
+  "scripts": {
+    "backend": "tsx src/backend.ts",
+    "client": "tsx src/ai-client.ts",
+    "mcp": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "groq-sdk": "^1.6.0",
+    "tsx": "^4.23.12",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0"
+  }
+}

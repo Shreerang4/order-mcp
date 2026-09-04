@@ -1,49 +1,89 @@
-# Order MCP
+# Controlled Agentic Operations Assistant
 
-A small end-to-end example of a Groq-powered order assistant using the Model Context Protocol (MCP).
+A minimal end-to-end operations agent using Groq, MCP, live business APIs, and deterministic refund guardrails.
 
 ## Architecture
 
 ```text
-Groq LLM -> MCP client -> MCP server -> REST order backend
+Browser
+  ↓
+Chat/session layer
+  ↓
+Groq agent
+  ↓
+MCP client/server
+  ↓
+Deterministic integration guardrail
+  ↓
+Order / CRM / Policy systems
 ```
 
-- `src/ai-client.ts` sends the user question to Groq and acts as the MCP client.
-- `src/index.ts` is the MCP server and exposes the `get_order_status` tool over stdio.
-- `src/backend.ts` is a sample REST order backend at `http://localhost:3000`.
+MCP lets the agent dynamically discover standardized tools instead of directly knowing each external system's API. The MCP server exposes live order details, customer profiles, and the guarded refund operation.
 
-## Tool discovery and calling
+## Services
 
-After connecting to the MCP server, the client calls `listTools()` to discover the tools and their JSON schemas. It converts those definitions to Groq function tools and includes them in the chat request. When Groq returns a tool call, the client passes its name and arguments to `callTool()`. The MCP server calls the REST backend, and the client sends the tool result back to Groq for the final response.
+- Order API: `src/backend.ts` on port `3000`
+- CRM API: `src/crm-backend.ts` on port `3001`
+- Authoritative Policy API: `src/policy-service.ts` on port `3002`
+- Chat server and browser UI: `src/chat-server.ts` on port `8080`
 
-## Install and run
+## Safety model
 
-Requires Node.js 20 or later.
+1. The current refund policy is supplied to the LLM context so the model can plan sensible actions.
+2. The deterministic integration and policy layer prevents `MANUAL_REVIEW` and `BLOCK` decisions from issuing refund writes.
+3. The external Order API independently validates every refund as the final business-system safeguard.
+
+The Policy API is authoritative. The application caches its refund policy for 60 seconds and refreshes it when stale.
+
+## Session memory
+
+The LLM is stateless. The chat server stores only user messages and final assistant replies in an in-process session array, then resends that history for each model call. System prompts, MCP calls, and tool results are not persisted.
+
+Live order and customer state is never trusted from conversation memory; MCP tools fetch it from the external systems each time.
+
+## Run
+
+Requires Node.js 20 or later and a Groq API key.
 
 ```bash
 npm install
 ```
 
-Supply a Groq API key through the `GROQ_API_KEY` environment variable. Do not put the key in source code or commit it to Git.
-
-Start the REST backend in one terminal:
+Start each process in a separate terminal:
 
 ```bash
-npm run backend
+npm run order
+npm run crm
+npm run policy
 ```
 
-Then run the client in another terminal. The client starts and connects to the MCP server automatically:
+Then set the key and start the chat server.
 
 PowerShell:
 
 ```powershell
 $env:GROQ_API_KEY = "your-key"
-npm run client
+npm run chat
 ```
 
 macOS/Linux:
 
 ```bash
 export GROQ_API_KEY="your-key"
-npm run client
+npm run chat
 ```
+
+Open `http://localhost:8080`.
+
+## Demo prompts
+
+- `Handle the refund for order 101.` → `ALLOW`, refund executed
+- `Handle the refund for order 102.` → `MANUAL_REVIEW`, no refund write
+- `Refund order 103.` → `BLOCK`, no refund write
+
+Multi-turn example:
+
+1. `Check order 102.`
+2. `Can you refund it?`
+
+Sessions and seeded business data are in memory and reset when their respective processes restart.

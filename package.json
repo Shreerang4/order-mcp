@@ -1,8 +1,12 @@
 {
   "name": "order-mcp",
   "version": "1.0.0",
-  "description": "Groq-powered order assistant using MCP and a REST backend",
+  "description": "Controlled agentic operations assistant using Groq, MCP, and deterministic guardrails",
   "scripts": {
+    "order": "tsx src/backend.ts",
+    "crm": "tsx src/crm-backend.ts",
+    "policy": "tsx src/policy-service.ts",
+    "chat": "tsx src/chat-server.ts",
     "backend": "tsx src/backend.ts",
     "client": "tsx src/ai-client.ts",
     "mcp": "tsx src/index.ts"

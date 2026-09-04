@@ -2,94 +2,75 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 
+import {
+    getCustomer,
+    getOrder,
+    requestRefund
+} from "./integrations.js";
 
 function createServer() {
-
     const server = new McpServer({
         name: "Order Support Server",
         version: "1.0.0"
     });
 
-
     server.registerTool(
-
-        "get_order_status",
-
+        "get_order_details",
         {
             description:
-                "Get the current status of an order using its order ID.",
-
+                "Get fresh order details from the live Order API. Use this before answering questions or planning actions for a specific order.",
             inputSchema: z.object({
-                order_id: z
-                    .number()
-                    .int()
-                    .describe("The numeric order ID")
+                order_id: z.number().int().positive().describe("The numeric order ID")
             })
         },
-
-        async ({ order_id }) => {
-
-            try {
-
-                const response = await fetch(
-                    `http://localhost:3000/orders/${order_id}`
-                );
-
-
-                if (!response.ok) {
-
-                    return {
-                        content: [
-                            {
-                                type: "text" as const,
-                                text: `Order ${order_id} was not found.`
-                            }
-                        ]
-                    };
-                }
-
-
-                const order = await response.json() as {
-                    order_id: number;
-                    status: string;
-                };
-
-
-                return {
-                    content: [
-                        {
-                            type: "text" as const,
-                            text:
-                                `Order ${order.order_id} status: ${order.status}`
-                        }
-                    ]
-                };
-
-            } catch (error) {
-
-                return {
-                    content: [
-                        {
-                            type: "text" as const,
-                            text:
-                                "Could not reach the Order Backend."
-                        }
-                    ],
-                    isError: true
-                };
-            }
-        }
+        async ({ order_id }) => jsonResult(await getOrder(order_id))
     );
 
+    server.registerTool(
+        "get_customer_profile",
+        {
+            description:
+                "Get a fresh customer profile from the live CRM, including tier, account activity, and fraud flag.",
+            inputSchema: z.object({
+                customer_id: z
+                    .number()
+                    .int()
+                    .positive()
+                    .describe("The numeric customer ID")
+            })
+        },
+        async ({ customer_id }) => jsonResult(await getCustomer(customer_id))
+    );
+
+    server.registerTool(
+        "request_refund",
+        {
+            description:
+                "Safely request a refund for an order. This is the only tool for refund attempts and returns the authoritative decision, reason, policy version, and whether an external write occurred.",
+            inputSchema: z.object({
+                order_id: z.number().int().positive().describe("The numeric order ID"),
+                reason: z.string().min(1).describe("Why the refund is being requested")
+            })
+        },
+        async ({ order_id, reason }) =>
+            jsonResult(await requestRefund(order_id, reason))
+    );
 
     return server;
 }
 
+function jsonResult(value: unknown) {
+    return {
+        content: [
+            {
+                type: "text" as const,
+                text: JSON.stringify(value)
+            }
+        ]
+    };
+}
 
 void serveStdio(createServer);
 
-
-// IMPORTANT:
-// MCP stdio uses stdout for protocol messages.
-// Debug messages must therefore use stderr.
+// MCP stdio reserves stdout for protocol messages.
 console.error("Order MCP Server running");

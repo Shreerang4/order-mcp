@@ -1,270 +1,230 @@
+import { pathToFileURL } from "node:url";
+
 import Groq from "groq-sdk";
 
 import { Client } from "@modelcontextprotocol/client";
-import { StdioClientTransport }
-    from "@modelcontextprotocol/client/stdio";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
+import { getRefundPolicySummary } from "./policy.js";
 
-// ======================================================
-// 1. CREATE MCP CLIENT
-// ======================================================
+const MAX_AGENT_ITERATIONS = 8;
 
-const mcpClient = new Client({
-    name: "Order AI Client",
-    version: "1.0.0"
-});
+export type ChatMessage = {
+    role: "user" | "assistant";
+    content: string;
+};
 
+export type AgentResult = {
+    reply: string;
+    toolTrace: string[];
+};
 
-// ======================================================
-// 2. TELL MCP CLIENT HOW TO START OUR MCP SERVER
-// ======================================================
+async function createAgentRuntime() {
+    const groqApiKey = process.env.GROQ_API_KEY;
 
-const transport = new StdioClientTransport({
-    command: "npx",
-    args: [
-        "tsx",
-        "src/index.ts"
-    ]
-});
-
-
-// ======================================================
-// 3. CONNECT TO MCP SERVER
-// ======================================================
-
-await mcpClient.connect(transport);
-
-
-// ======================================================
-// 4. DISCOVER TOOLS FROM MCP SERVER
-// ======================================================
-
-const { tools: mcpTools } =
-    await mcpClient.listTools();
-
-
-console.log(
-    "Discovered MCP tools:",
-    mcpTools.map(tool => tool.name)
-);
-
-
-// ======================================================
-// 5. CONVERT MCP TOOL DEFINITIONS
-//    INTO GROQ FUNCTION-TOOL DEFINITIONS
-// ======================================================
-
-const groqTools = mcpTools.map(tool => ({
-
-    type: "function" as const,
-
-    function: {
-
-        name: tool.name,
-
-        description:
-            tool.description ?? "",
-
-        parameters:
-            tool.inputSchema
+    if (!groqApiKey) {
+        throw new Error("GROQ_API_KEY must be set in the environment.");
     }
-}));
 
-
-// ======================================================
-// 6. CREATE GROQ CLIENT
-// ======================================================
-
-const groqApiKey = process.env.GROQ_API_KEY;
-
-if (!groqApiKey) {
-    throw new Error(
-        "GROQ_API_KEY must be set in the environment."
-    );
-}
-
-const groq = new Groq({
-    apiKey: groqApiKey
-});
-
-
-// ======================================================
-// 7. USER'S QUESTION
-// ======================================================
-
-const userQuestion =
-    "Where is order 101?";
-
-
-// Conversation history.
-//
-// Using any[] here keeps this tutorial focused on MCP
-// rather than Groq SDK's detailed TypeScript message types.
-const messages: any[] = [
-
-    {
-        role: "system",
-
-        content:
-            "You are an order support assistant. " +
-            "Use the provided order tools whenever the user asks " +
-            "about an order's status. Do not invent order information."
-    },
-
-    {
-        role: "user",
-        content: userQuestion
-    }
-];
-
-
-// ======================================================
-// 8. ASK GROQ MODEL
-// ======================================================
-
-let response =
-    await groq.chat.completions.create({
-
-        model: "openai/gpt-oss-20b",
-
-        messages: messages,
-
-        tools: groqTools,
-
-        tool_choice: "auto"
+    const mcpClient = new Client({
+        name: "Order AI Client",
+        version: "1.0.0"
     });
 
+    const transport = new StdioClientTransport({
+        command: "npx",
+        args: ["tsx", "src/index.ts"]
+    });
 
-let assistantMessage =
-    response.choices[0].message;
+    try {
+        await mcpClient.connect(transport);
 
+        const { tools: mcpTools } = await mcpClient.listTools();
+        const groqTools = mcpTools.map(tool => ({
+            type: "function" as const,
+            function: {
+                name: tool.name,
+                description: tool.description ?? "",
+                parameters: tool.inputSchema
+            }
+        }));
 
-// Add Groq's response to conversation history.
-//
-// This response may contain:
-//      content
-// OR:
-//      tool_calls
-messages.push(assistantMessage);
+        console.log(
+            "Discovered MCP tools:",
+            mcpTools.map(tool => tool.name)
+        );
 
-
-// ======================================================
-// 9. DID MODEL REQUEST A TOOL?
-// ======================================================
-
-const toolCalls =
-    assistantMessage.tool_calls;
-
-
-if (!toolCalls || toolCalls.length === 0) {
-
-    // Model decided that no tool was needed.
-
-    console.log(
-        "AI:",
-        assistantMessage.content
-    );
-
+        return {
+            groq: new Groq({ apiKey: groqApiKey }),
+            groqTools,
+            mcpClient
+        };
+    } catch (error) {
+        await mcpClient.close();
+        throw error;
+    }
 }
 
-else {
+type AgentRuntime = Awaited<ReturnType<typeof createAgentRuntime>>;
+let runtimePromise: Promise<AgentRuntime> | undefined;
 
-    // ==================================================
-    // 10. EXECUTE EACH REQUESTED TOOL THROUGH MCP
-    // ==================================================
+function getAgentRuntime(): Promise<AgentRuntime> {
+    runtimePromise ??= createAgentRuntime().catch(error => {
+        runtimePromise = undefined;
+        throw error;
+    });
 
-    for (const toolCall of toolCalls) {
+    return runtimePromise;
+}
 
-        const toolName =
-            toolCall.function.name;
+export async function runAgent(
+    userMessage: string,
+    conversationHistory: ChatMessage[] = []
+): Promise<AgentResult> {
+    const policySummary = await getRefundPolicySummary();
+    const { groq, groqTools, mcpClient } = await getAgentRuntime();
+    const toolTrace: string[] = [];
+    const workingMessages: any[] = [
+        {
+            role: "system",
+            content: [
+                "You are a controlled operations assistant.",
+                "Use tools for live order and customer information.",
+                "Never invent operational data or claim an action occurred without a tool result.",
+                "Never state customer attributes unless get_customer_profile returned them in the current turn.",
+                "For every refund request, obtain live order and customer details, then call request_refund for the authoritative decision.",
+                "Do not predict a refund decision from the policy summary instead of calling request_refund.",
+                "Use the current refund policy to plan sensible actions.",
+                "MANUAL_REVIEW and BLOCK must never be bypassed.",
+                "request_refund is the only tool for attempting refunds.",
+                "Report the tool's decision, reason, policy version, and external-write status.",
+                "",
+                policySummary
+            ].join("\n")
+        },
+        ...conversationHistory.map(message => ({ ...message })),
+        {
+            role: "user",
+            content: userMessage
+        }
+    ];
 
-        const toolArguments =
-            JSON.parse(
-                toolCall.function.arguments
-            );
-
-
-        console.log(
-            "\nGroq decided to call:"
-        );
-
-        console.log(
-            toolName,
-            toolArguments
-        );
-
-
-        // THIS IS THE ACTUAL MCP TOOL CALL
-
-        const mcpResult =
-            await mcpClient.callTool({
-
-                name: toolName,
-
-                arguments: toolArguments
-            });
-
-
-        console.log(
-            "\nMCP returned:"
-        );
-
-        console.log(
-            mcpResult.content
-        );
-
-
-        // ==================================================
-        // 11. SEND MCP RESULT BACK INTO CONVERSATION
-        // ==================================================
-
-        messages.push({
-
-            role: "tool",
-
-            tool_call_id:
-                toolCall.id,
-
-            name:
-                toolName,
-
-            content:
-                JSON.stringify(
-                    mcpResult.content
-                )
+    for (let iteration = 1; iteration <= MAX_AGENT_ITERATIONS; iteration += 1) {
+        const response = await groq.chat.completions.create({
+            model: "openai/gpt-oss-20b",
+            messages: workingMessages,
+            tools: groqTools,
+            tool_choice: "auto"
         });
+
+        const assistantMessage = response.choices[0].message;
+        workingMessages.push(assistantMessage);
+
+        const toolCalls = assistantMessage.tool_calls;
+
+        if (!toolCalls || toolCalls.length === 0) {
+            return {
+                reply: assistantMessage.content ?? "The agent returned no text response.",
+                toolTrace
+            };
+        }
+
+        for (const toolCall of toolCalls) {
+            const toolName = toolCall.function.name;
+            let toolResult: string;
+
+            toolTrace.push(toolName);
+
+            try {
+                const toolArguments = JSON.parse(toolCall.function.arguments) as Record<
+                    string,
+                    unknown
+                >;
+
+                console.log(
+                    `Tool call ${iteration}:`,
+                    toolName,
+                    toolArguments
+                );
+
+                const mcpResult = await mcpClient.callTool({
+                    name: toolName,
+                    arguments: toolArguments
+                });
+
+                toolResult = getToolResultText(mcpResult);
+            } catch (error) {
+                toolResult = JSON.stringify({
+                    error: error instanceof Error ? error.message : String(error)
+                });
+            }
+
+            console.log("Tool result:", toolResult);
+
+            workingMessages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                name: toolName,
+                content: toolResult
+            });
+        }
     }
 
-
-    // ==================================================
-    // 12. ASK GROQ TO PRODUCE FINAL HUMAN ANSWER
-    // ==================================================
-
-    const finalResponse =
-        await groq.chat.completions.create({
-
-            model: "openai/gpt-oss-20b",
-
-            messages: messages,
-
-            tools: groqTools,
-
-            tool_choice: "none"
-        });
-
-
-    console.log(
-        "\nAI:",
-        finalResponse
-            .choices[0]
-            .message
-            .content
-    );
+    throw new Error(`Agent exceeded ${MAX_AGENT_ITERATIONS} iterations.`);
 }
 
+export async function closeAgent(): Promise<void> {
+    if (!runtimePromise) {
+        return;
+    }
 
-// ======================================================
-// 13. CLEANLY SHUT DOWN MCP CONNECTION
-// ======================================================
+    try {
+        const { mcpClient } = await runtimePromise;
+        await mcpClient.close();
+    } catch {
+        // Initialization failed before an MCP connection was available.
+    } finally {
+        runtimePromise = undefined;
+    }
+}
 
-await mcpClient.close();
+function getToolResultText(result: { content: unknown[] }): string {
+    const textParts = result.content.flatMap(item => {
+        if (
+            typeof item === "object" &&
+            item !== null &&
+            "type" in item &&
+            "text" in item &&
+            item.type === "text" &&
+            typeof item.text === "string"
+        ) {
+            return [item.text];
+        }
+
+        return [];
+    });
+
+    return textParts.length > 0
+        ? textParts.join("\n")
+        : JSON.stringify(result.content);
+}
+
+const isDirectRun = Boolean(
+    process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+);
+
+if (isDirectRun) {
+    const userMessage =
+        process.argv.slice(2).join(" ") || "What is the status of order 101?";
+
+    try {
+        const result = await runAgent(userMessage);
+        console.log("Final response:", result.reply);
+        console.log("Tool trace:", result.toolTrace);
+    } catch (error) {
+        console.error(error instanceof Error ? error.message : error);
+        process.exitCode = 1;
+    } finally {
+        await closeAgent();
+    }
+}
